@@ -28,7 +28,8 @@ pub fn run() {
             commands::list_ollama_models,
             commands::generate_chat,
             commands::cancel_generation,
-            commands::cancel_session
+            commands::cancel_session,
+            commands::create_branch_session
         ])
         .setup(|app| {
             if cfg!(debug_assertions) {

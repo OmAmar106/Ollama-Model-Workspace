@@ -1,122 +1,178 @@
-import { useState } from 'react'
-import heroImg from './assets/hero.png'
-import reactLogo from './assets/react.svg'
-import viteLogo from './assets/vite.svg'
-import './App.css'
+import { useState, useEffect, useCallback } from 'react';
+import { Sidebar } from './components/layout/Sidebar';
+import { Header } from './components/layout/Header';
+import { MessageList } from './components/chat/MessageList';
+import { Composer } from './components/chat/Composer';
+import { SystemInstructionsDrawer } from './components/panels/SystemInstructionsDrawer';
+import { useChat } from './hooks/useChat';
+import { useModels } from './hooks/useModels';
+import { useOllamaHealth } from './hooks/useOllamaHealth';
+import './styles/index.css';
 
-function App() {
-  const [count, setCount] = useState(0)
+export function App() {
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
+  const [isInstructionsOpen, setIsInstructionsOpen] = useState(false);
+
+  const {
+    models,
+    selectedModel,
+    selectModel,
+    refreshModels,
+  } = useModels();
+
+  const {
+    health,
+    isChecking: isCheckingHealth,
+    refreshHealth,
+  } = useOllamaHealth();
+
+  const {
+    sessions,
+    currentSessionId,
+    currentSession,
+    messages,
+    isLoadingMessages,
+    isGenerating,
+    streamContent,
+    streamThinking,
+    isThinkEnabled,
+    setIsThinkEnabled,
+    activeBranch,
+    startNewChat,
+    selectSession,
+    sendMessage,
+    stopGeneration,
+    renameSession,
+    changeSessionModel,
+    updateSystemPrompt,
+    removeSession,
+    startBranchFromMessage,
+    sendBranchMessage,
+    closeBranch,
+  } = useChat(selectedModel);
+
+  // Synchronize current session's model with selectedModel
+  useEffect(() => {
+    if (currentSession?.model_name && currentSession.model_name !== selectedModel) {
+      selectModel(currentSession.model_name);
+    }
+  }, [currentSession, selectedModel, selectModel]);
+
+  const handleSelectModel = useCallback(
+    (modelName: string) => {
+      selectModel(modelName);
+      if (currentSessionId) {
+        changeSessionModel(currentSessionId, modelName);
+      }
+    },
+    [selectModel, currentSessionId, changeSessionModel]
+  );
+
+  // Global Keyboard Shortcuts
+  useEffect(() => {
+    const handleGlobalKeyDown = (e: KeyboardEvent) => {
+      // ⌘N or Ctrl+N -> New Chat
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'n') {
+        e.preventDefault();
+        startNewChat();
+      }
+
+      // ⌘B or Ctrl+B -> Toggle Sidebar
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'b') {
+        e.preventDefault();
+        setIsSidebarCollapsed((prev) => !prev);
+      }
+
+      // Esc -> Stop generation or close drawer
+      if (e.key === 'Escape') {
+        if (isInstructionsOpen) {
+          setIsInstructionsOpen(false);
+        } else if (isGenerating) {
+          stopGeneration();
+        } else if (activeBranch) {
+          closeBranch();
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleGlobalKeyDown);
+    return () => window.removeEventListener('keydown', handleGlobalKeyDown);
+  }, [startNewChat, isInstructionsOpen, isGenerating, stopGeneration, activeBranch, closeBranch]);
 
   return (
-    <>
-      <section id="center">
-        <div className="hero">
-          <img src={heroImg} className="base" width="170" height="179" alt="" />
-          <img src={reactLogo} className="framework" alt="React logo" />
-          <img src={viteLogo} className="vite" alt="Vite logo" />
-        </div>
-        <div>
-          <h1>Get started</h1>
-          <p>
-            Edit <code>src/App.tsx</code> and save to test <code>HMR</code>
-          </p>
-        </div>
-        <button
-          type="button"
-          className="counter"
-          onClick={() => setCount((count) => count + 1)}
-        >
-          Count is {count}
-        </button>
-      </section>
+    <div className="app-container">
+      {/* Collapsible Left Sidebar */}
+      <Sidebar
+        sessions={sessions}
+        currentSessionId={currentSessionId}
+        onSelectSession={selectSession}
+        onNewChat={startNewChat}
+        onRenameSession={renameSession}
+        onDeleteSession={removeSession}
+        isCollapsed={isSidebarCollapsed}
+      />
 
-      <div className="ticks"></div>
+      {/* Main Conversation Workspace */}
+      <div className="main-content">
+        <Header
+          currentSession={currentSession}
+          models={models}
+          selectedModel={selectedModel}
+          onSelectModel={handleSelectModel}
+          onRenameSession={renameSession}
+          onToggleSidebar={() => setIsSidebarCollapsed((prev) => !prev)}
+          isSidebarCollapsed={isSidebarCollapsed}
+          onOpenSystemInstructions={() => setIsInstructionsOpen(true)}
+          hasSystemInstructions={Boolean(currentSession?.system_prompt?.trim())}
+          health={health}
+          isCheckingHealth={isCheckingHealth}
+          onRefreshHealth={() => {
+            refreshHealth();
+            refreshModels();
+          }}
+        />
 
-      <section id="next-steps">
-        <div id="docs">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#documentation-icon"></use>
-          </svg>
-          <h2>Documentation</h2>
-          <p>Your questions, answered</p>
-          <ul>
-            <li>
-              <a href="https://vite.dev/" target="_blank">
-                <img className="logo" src={viteLogo} alt="" />
-                Explore Vite
-              </a>
-            </li>
-            <li>
-              <a href="https://react.dev/" target="_blank">
-                <img className="button-icon" src={reactLogo} alt="" />
-                Learn more
-              </a>
-            </li>
-          </ul>
-        </div>
-        <div id="social">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#social-icon"></use>
-          </svg>
-          <h2>Connect with us</h2>
-          <p>Join the Vite community</p>
-          <ul>
-            <li>
-              <a href="https://github.com/vitejs/vite" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#github-icon"></use>
-                </svg>
-                GitHub
-              </a>
-            </li>
-            <li>
-              <a href="https://chat.vite.dev/" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#discord-icon"></use>
-                </svg>
-                Discord
-              </a>
-            </li>
-            <li>
-              <a href="https://x.com/vite_js" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#x-icon"></use>
-                </svg>
-                X.com
-              </a>
-            </li>
-            <li>
-              <a href="https://bsky.app/profile/vite.dev" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#bluesky-icon"></use>
-                </svg>
-                Bluesky
-              </a>
-            </li>
-          </ul>
-        </div>
-      </section>
+        <MessageList
+          messages={messages}
+          isLoading={isLoadingMessages}
+          isStreaming={isGenerating}
+          streamingContent={streamContent}
+          streamingThinking={streamThinking}
+          selectedModel={selectedModel}
+          onSelectSuggestion={(prompt) => sendMessage(prompt, selectedModel)}
+          onBranchFromHere={startBranchFromMessage}
+          onRetry={(prompt) => sendMessage(prompt, selectedModel)}
+          activeBranch={activeBranch}
+          onSendBranchMessage={sendBranchMessage}
+          onCloseBranch={closeBranch}
+        />
 
-      <div className="ticks"></div>
-      <section id="spacer"></section>
-    </>
-  )
+        <Composer
+          onSend={(prompt) => sendMessage(prompt, selectedModel)}
+          onStop={stopGeneration}
+          isGenerating={isGenerating}
+          models={models}
+          selectedModel={selectedModel}
+          onSelectModel={handleSelectModel}
+          isThinkEnabled={isThinkEnabled}
+          onToggleThink={() => setIsThinkEnabled((prev) => !prev)}
+        />
+      </div>
+
+      {/* Per-Chat System Instructions Drawer */}
+      <SystemInstructionsDrawer
+        isOpen={isInstructionsOpen}
+        onClose={() => setIsInstructionsOpen(false)}
+        savedInstructions={currentSession?.system_prompt || null}
+        onSave={async (newPrompt) => {
+          if (currentSessionId) {
+            await updateSystemPrompt(currentSessionId, newPrompt);
+          }
+        }}
+        sessionTitle={currentSession?.title || 'Current Session'}
+      />
+    </div>
+  );
 }
 
-export default App
+export default App;

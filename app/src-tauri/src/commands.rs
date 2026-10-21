@@ -141,6 +141,87 @@ pub fn update_session(
 }
 
 #[tauri::command]
+pub fn create_branch_session(
+    database: State<'_, AppDatabase>,
+    cache: State<'_, AppSessionCache>,
+    parent_session_id: String,
+    message_id: String,
+    title: Option<String>,
+) -> Result<Session, String> {
+    let connection = database
+        .0
+        .lock()
+        .map_err(|error| format!("Database lock failed: {error}"))?;
+
+    let parent_session = cache
+        .0
+        .get_or_restore(&connection, &parent_session_id)
+        .map_err(|error| format!("Database error: {error}"))?
+        .ok_or_else(|| format!("Parent session not found: {parent_session_id}"))?;
+
+    let parent_messages = messages::get_session_messages(&connection, &parent_session_id)
+        .map_err(|error| format!("Failed to load parent messages: {error}"))?;
+
+    let mut branch_messages = Vec::new();
+    let mut found = false;
+    for msg in parent_messages {
+        branch_messages.push(msg.clone());
+        if msg.id == message_id {
+            found = true;
+            break;
+        }
+    }
+
+    if !found {
+        return Err(format!("Message not found in session: {message_id}"));
+    }
+
+    let branch_title = title.unwrap_or_else(|| {
+        format!(
+            "Branch: {}",
+            parent_session.title.as_deref().unwrap_or("Chat")
+        )
+    });
+
+    let branch_metadata = serde_json::json!({
+        "parent_session_id": parent_session_id,
+        "branched_from_message_id": message_id,
+        "is_branch": true,
+    })
+    .to_string();
+
+    let mut new_session = sessions::create_session(
+        &connection,
+        &parent_session.model_name,
+        parent_session.think,
+    )
+    .map_err(|error| format!("Failed to create branch session: {error}"))?;
+
+    new_session.title = Some(branch_title);
+    new_session.system_prompt = parent_session.system_prompt.clone();
+    new_session.options_json = Some(branch_metadata);
+
+    sessions::update_session(&connection, &new_session)
+        .map_err(|error| format!("Failed to set branch details: {error}"))?;
+
+    for msg in branch_messages {
+        messages::create_message(
+            &connection,
+            &new_session.id,
+            &msg.role,
+            &msg.content,
+            msg.thinking_content.as_deref(),
+            &msg.status,
+        )
+        .map_err(|error| format!("Failed to copy message into branch: {error}"))?;
+    }
+
+    cache.0.insert(new_session.clone());
+
+    Ok(new_session)
+}
+
+#[tauri::command]
 pub fn delete_session(
     database: State<'_, AppDatabase>,
     cache: State<'_, AppSessionCache>,
