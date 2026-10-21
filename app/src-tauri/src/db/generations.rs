@@ -1,9 +1,9 @@
 use chrono::Utc;
 use rusqlite::{Connection, OptionalExtension, params};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Generation {
     pub id: String,
     pub message_id: String,
@@ -136,6 +136,43 @@ pub fn get_generation(
         },
     )
     .optional()
+}
+
+/// Recovers any generations and associated messages that were left in 'running' / 'generating' state.
+/// Marks them as 'interrupted', sets finished_at/completed_at timestamps, and leaves partial output intact.
+/// This operation is idempotent.
+pub fn recover_interrupted_generations(conn: &Connection) -> rusqlite::Result<usize> {
+    let now = Utc::now().to_rfc3339();
+
+    let mut stmt =
+        conn.prepare("SELECT id, message_id FROM generations WHERE status = 'running'")?;
+    let running: Vec<(String, String)> = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let count = running.len();
+
+    for (gen_id, msg_id) in running {
+        conn.execute(
+            "UPDATE generations
+             SET status = 'interrupted',
+                 finished_at = ?1,
+                 error_code = 'INTERRUPTED',
+                 error_message = 'Generation interrupted by application shutdown'
+             WHERE id = ?2 AND status = 'running'",
+            params![now, gen_id],
+        )?;
+
+        conn.execute(
+            "UPDATE messages
+             SET status = 'interrupted',
+                 completed_at = ?1
+             WHERE id = ?2 AND status = 'generating'",
+            params![now, msg_id],
+        )?;
+    }
+
+    Ok(count)
 }
 
 #[cfg(test)]
@@ -312,5 +349,34 @@ mod tests {
             .expect("generation should exist");
 
         assert!(saved.tokens_per_second.is_none());
+    }
+
+    #[test]
+    fn recovers_running_generations_and_is_idempotent() {
+        let (_dir, conn, message_id) = setup_database();
+
+        let gen1 = create_generation(&conn, &message_id, "test-model").unwrap();
+        assert_eq!(gen1.status, "running");
+
+        // Run recovery
+        let count = recover_interrupted_generations(&conn).expect("recovery should succeed");
+        assert_eq!(count, 1);
+
+        // Verify generation is marked interrupted
+        let saved_gen = get_generation(&conn, &gen1.id).unwrap().unwrap();
+        assert_eq!(saved_gen.status, "interrupted");
+        assert!(saved_gen.finished_at.is_some());
+        assert_eq!(saved_gen.error_code.as_deref(), Some("INTERRUPTED"));
+
+        // Verify associated message is marked interrupted
+        let saved_msg = crate::db::messages::get_message(&conn, &message_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved_msg.status, "interrupted");
+        assert!(saved_msg.completed_at.is_some());
+
+        // Recovery is idempotent: running again finds 0 running generations
+        let count2 = recover_interrupted_generations(&conn).expect("second recovery");
+        assert_eq!(count2, 0);
     }
 }

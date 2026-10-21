@@ -84,6 +84,77 @@ pub fn get_session(connection: &Connection, session_id: &str) -> Result<Option<S
         .optional()
 }
 
+pub fn list_sessions(connection: &Connection) -> Result<Vec<Session>> {
+    let mut stmt = connection.prepare(
+        "SELECT
+            id,
+            title,
+            model_name,
+            think,
+            system_prompt,
+            options_json,
+            created_at,
+            updated_at
+         FROM sessions
+         ORDER BY updated_at DESC, created_at DESC",
+    )?;
+
+    let rows = stmt.query_map([], |row| {
+        let think: Option<i64> = row.get(3)?;
+        Ok(Session {
+            id: row.get(0)?,
+            title: row.get(1)?,
+            model_name: row.get(2)?,
+            think: think.map(|value| value != 0),
+            system_prompt: row.get(4)?,
+            options_json: row.get(5)?,
+            created_at: row.get(6)?,
+            updated_at: row.get(7)?,
+        })
+    })?;
+
+    rows.collect()
+}
+
+pub fn update_session(connection: &Connection, session: &Session) -> Result<bool> {
+    let updated_at = Utc::now().to_rfc3339();
+    let updated = connection.execute(
+        "UPDATE sessions
+         SET title = ?1,
+             model_name = ?2,
+             think = ?3,
+             system_prompt = ?4,
+             options_json = ?5,
+             updated_at = ?6
+         WHERE id = ?7",
+        params![
+            session.title,
+            session.model_name,
+            session.think.map(i64::from),
+            session.system_prompt,
+            session.options_json,
+            updated_at,
+            session.id,
+        ],
+    )?;
+
+    Ok(updated == 1)
+}
+
+pub fn update_session_timestamp(connection: &Connection, session_id: &str) -> Result<bool> {
+    let updated_at = Utc::now().to_rfc3339();
+    let updated = connection.execute(
+        "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
+        params![updated_at, session_id],
+    )?;
+    Ok(updated == 1)
+}
+
+pub fn delete_session(connection: &Connection, session_id: &str) -> Result<bool> {
+    let deleted = connection.execute("DELETE FROM sessions WHERE id = ?1", params![session_id])?;
+    Ok(deleted == 1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -156,5 +227,36 @@ mod tests {
             get_session(&connection, "session-that-does-not-exist").expect("query should succeed");
 
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn lists_updates_and_deletes_sessions() {
+        let (_directory, connection) = setup_database();
+
+        let s1 = create_session(&connection, "model-1", None).unwrap();
+        let s2 = create_session(&connection, "model-2", Some(true)).unwrap();
+
+        let list = list_sessions(&connection).unwrap();
+        assert_eq!(list.len(), 2);
+
+        let mut updated_s1 = s1.clone();
+        updated_s1.title = Some("New Title".to_string());
+        updated_s1.system_prompt = Some("Act as an assistant".to_string());
+        let updated = update_session(&connection, &updated_s1).unwrap();
+        assert!(updated);
+
+        let retrieved = get_session(&connection, &s1.id).unwrap().unwrap();
+        assert_eq!(retrieved.title.as_deref(), Some("New Title"));
+        assert_eq!(
+            retrieved.system_prompt.as_deref(),
+            Some("Act as an assistant")
+        );
+
+        let deleted = delete_session(&connection, &s2.id).unwrap();
+        assert!(deleted);
+
+        let after_delete = list_sessions(&connection).unwrap();
+        assert_eq!(after_delete.len(), 1);
+        assert_eq!(after_delete[0].id, s1.id);
     }
 }

@@ -1,8 +1,133 @@
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
-const DEFAULT_OLLAMA_URL: &str = "http://localhost:11434";
+pub const DEFAULT_OLLAMA_URL: &str = "http://127.0.0.1:11434";
+
+pub fn resolve_base_url() -> String {
+    if let Ok(url) = std::env::var("OLLAMA_BASE_URL") {
+        let trimmed = url.trim();
+        if !trimmed.is_empty() {
+            return trimmed.trim_end_matches('/').to_string();
+        }
+    }
+    if let Ok(host) = std::env::var("OLLAMA_HOST") {
+        let trimmed = host.trim();
+        if !trimmed.is_empty() {
+            if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+                return trimmed.trim_end_matches('/').to_string();
+            } else {
+                return format!("http://{}", trimmed.trim_end_matches('/'));
+            }
+        }
+    }
+    DEFAULT_OLLAMA_URL.to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum OllamaErrorKind {
+    ConnectionFailed,
+    Timeout,
+    HttpError,
+    MalformedResponse,
+    ModelNotFound,
+    StreamError,
+    InvalidRequest,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OllamaError {
+    pub kind: OllamaErrorKind,
+    pub message: String,
+    pub status_code: Option<u16>,
+}
+
+impl OllamaError {
+    pub fn new(kind: OllamaErrorKind, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+            status_code: None,
+        }
+    }
+
+    pub fn http(status_code: u16, message: impl Into<String>) -> Self {
+        Self {
+            kind: OllamaErrorKind::HttpError,
+            message: message.into(),
+            status_code: Some(status_code),
+        }
+    }
+
+    pub fn cancelled() -> Self {
+        Self {
+            kind: OllamaErrorKind::Cancelled,
+            message: "Generation was cancelled".to_string(),
+            status_code: None,
+        }
+    }
+}
+
+impl std::fmt::Display for OllamaError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl std::error::Error for OllamaError {}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HealthStatus {
+    pub is_healthy: bool,
+    pub version: Option<String>,
+    pub base_url: String,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct ModelDetails {
+    #[serde(default)]
+    pub parent_model: Option<String>,
+    #[serde(default)]
+    pub format: Option<String>,
+    #[serde(default)]
+    pub family: Option<String>,
+    #[serde(default)]
+    pub families: Option<Vec<String>>,
+    #[serde(default)]
+    pub parameter_size: Option<String>,
+    #[serde(default)]
+    pub quantization_level: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ModelInfo {
+    pub name: String,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub modified_at: Option<String>,
+    #[serde(default)]
+    pub size: Option<u64>,
+    #[serde(default)]
+    pub digest: Option<String>,
+    #[serde(default)]
+    pub details: Option<ModelDetails>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct TagsResponse {
+    #[serde(default)]
+    pub models: Vec<ModelInfo>,
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct GenerateRequest {
@@ -27,6 +152,12 @@ pub struct GenerateChunk {
     pub prompt_eval_count: Option<i64>,
     #[serde(default)]
     pub eval_count: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamOutcome {
+    Completed,
+    Cancelled,
 }
 
 #[derive(Default)]
@@ -74,24 +205,210 @@ pub struct OllamaClient {
     http: reqwest::Client,
 }
 
+impl Default for OllamaClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl OllamaClient {
     pub fn new() -> Self {
+        Self::with_base_url(resolve_base_url())
+    }
+
+    pub fn with_base_url(base_url: impl Into<String>) -> Self {
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(120))
+            .connect_timeout(Duration::from_secs(5))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+
         Self {
-            base_url: DEFAULT_OLLAMA_URL.to_string(),
-            http: reqwest::Client::new(),
+            base_url: base_url.into().trim_end_matches('/').to_string(),
+            http,
         }
+    }
+
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    pub async fn check_health(&self) -> HealthStatus {
+        let url = format!("{}/api/version", self.base_url);
+        let request = self
+            .http
+            .get(&url)
+            .timeout(Duration::from_secs(3))
+            .send()
+            .await;
+
+        match request {
+            Ok(response) => {
+                let status = response.status();
+                if status.is_success() {
+                    #[derive(Deserialize)]
+                    struct VersionResp {
+                        version: Option<String>,
+                    }
+                    let version = response
+                        .json::<VersionResp>()
+                        .await
+                        .ok()
+                        .and_then(|v| v.version);
+                    HealthStatus {
+                        is_healthy: true,
+                        version,
+                        base_url: self.base_url.clone(),
+                        error: None,
+                    }
+                } else {
+                    HealthStatus {
+                        is_healthy: false,
+                        version: None,
+                        base_url: self.base_url.clone(),
+                        error: Some(format!("Ollama server returned HTTP {status}")),
+                    }
+                }
+            }
+            Err(err) => {
+                // Try fallback to GET / in case /api/version isn't available
+                let fallback = self
+                    .http
+                    .get(&self.base_url)
+                    .timeout(Duration::from_secs(2))
+                    .send()
+                    .await;
+
+                match fallback {
+                    Ok(fb_resp) if fb_resp.status().is_success() => HealthStatus {
+                        is_healthy: true,
+                        version: None,
+                        base_url: self.base_url.clone(),
+                        error: None,
+                    },
+                    _ => HealthStatus {
+                        is_healthy: false,
+                        version: None,
+                        base_url: self.base_url.clone(),
+                        error: Some(format!(
+                            "Could not connect to Ollama at {}: {err}",
+                            self.base_url
+                        )),
+                    },
+                }
+            }
+        }
+    }
+
+    pub async fn list_models(&self) -> Result<Vec<ModelInfo>, OllamaError> {
+        let url = format!("{}/api/tags", self.base_url);
+        let response = self
+            .http
+            .get(&url)
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await
+            .map_err(|err| {
+                if err.is_timeout() {
+                    OllamaError::new(
+                        OllamaErrorKind::Timeout,
+                        format!(
+                            "Timeout while listing models from Ollama at {}",
+                            self.base_url
+                        ),
+                    )
+                } else {
+                    OllamaError::new(
+                        OllamaErrorKind::ConnectionFailed,
+                        format!("Failed to connect to Ollama at {}: {err}", self.base_url),
+                    )
+                }
+            })?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(OllamaError::http(
+                status.as_u16(),
+                format!("Ollama returned HTTP {status}: {error_text}"),
+            ));
+        }
+
+        let body_bytes = response.bytes().await.map_err(|err| {
+            OllamaError::new(
+                OllamaErrorKind::MalformedResponse,
+                format!("Failed to read response body: {err}"),
+            )
+        })?;
+
+        if body_bytes.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let parsed: TagsResponse = serde_json::from_slice(&body_bytes).map_err(|err| {
+            OllamaError::new(
+                OllamaErrorKind::MalformedResponse,
+                format!("Failed to parse models JSON response from Ollama: {err}"),
+            )
+        })?;
+
+        Ok(parsed.models)
+    }
+
+    pub async fn validate_model(&self, model_name: &str) -> Result<bool, OllamaError> {
+        let trimmed = model_name.trim();
+        if trimmed.is_empty() {
+            return Err(OllamaError::new(
+                OllamaErrorKind::InvalidRequest,
+                "Model name cannot be empty",
+            ));
+        }
+
+        let models = self.list_models().await?;
+        let exists = models.iter().any(|m| {
+            m.name == trimmed
+                || m.model.as_deref() == Some(trimmed)
+                || m.name.starts_with(&format!("{trimmed}:"))
+        });
+
+        Ok(exists)
     }
 
     pub async fn generate_stream<F>(
         &self,
         request: GenerateRequest,
-        mut on_chunk: F,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+        on_chunk: F,
+    ) -> Result<StreamOutcome, OllamaError>
     where
         F: FnMut(GenerateChunk) + Send,
     {
-        let url = format!("{}/api/generate", self.base_url);
+        self.generate_stream_cancellable(request, None, on_chunk)
+            .await
+    }
 
+    pub async fn generate_stream_cancellable<F>(
+        &self,
+        request: GenerateRequest,
+        cancel_flag: Option<Arc<AtomicBool>>,
+        mut on_chunk: F,
+    ) -> Result<StreamOutcome, OllamaError>
+    where
+        F: FnMut(GenerateChunk) + Send,
+    {
+        if request.model.trim().is_empty() {
+            return Err(OllamaError::new(
+                OllamaErrorKind::InvalidRequest,
+                "Model name cannot be empty",
+            ));
+        }
+        if request.prompt.trim().is_empty() {
+            return Err(OllamaError::new(
+                OllamaErrorKind::InvalidRequest,
+                "Prompt cannot be empty",
+            ));
+        }
+
+        let url = format!("{}/api/generate", self.base_url);
         let mut body = json!({
             "model": request.model,
             "prompt": request.prompt,
@@ -102,55 +419,148 @@ impl OllamaClient {
             body["think"] = json!(think);
         }
 
-        let response = self.http.post(url).json(&body).send().await?;
-        let status = response.status();
+        let response = self
+            .http
+            .post(url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|err| {
+                if err.is_timeout() {
+                    OllamaError::new(
+                        OllamaErrorKind::Timeout,
+                        format!(
+                            "Timeout starting generation with Ollama at {}",
+                            self.base_url
+                        ),
+                    )
+                } else {
+                    OllamaError::new(
+                        OllamaErrorKind::ConnectionFailed,
+                        format!("Failed to connect to Ollama at {}: {err}", self.base_url),
+                    )
+                }
+            })?;
 
+        let status = response.status();
         if !status.is_success() {
-            let error_body = response.text().await?;
-            return Err(format!("Ollama returned HTTP {status}: {error_body}").into());
+            let error_body = response.text().await.unwrap_or_default();
+            return Err(OllamaError::http(
+                status.as_u16(),
+                format!("Ollama returned HTTP {status}: {error_body}"),
+            ));
         }
 
         let mut stream = response.bytes_stream();
         let mut decoder = StreamDecoder::default();
 
         while let Some(result) = stream.next().await {
-            let bytes = result?;
+            // Check cancellation before processing next chunk
+            if let Some(cancel) = &cancel_flag {
+                if cancel.load(Ordering::Relaxed) {
+                    return Ok(StreamOutcome::Cancelled);
+                }
+            }
 
-            for chunk in decoder.push(&bytes)? {
+            let bytes = result.map_err(|err| {
+                OllamaError::new(
+                    OllamaErrorKind::StreamError,
+                    format!("Network stream error: {err}"),
+                )
+            })?;
+
+            let chunks = decoder.push(&bytes).map_err(|err| {
+                OllamaError::new(
+                    OllamaErrorKind::MalformedResponse,
+                    format!("Malformed JSON chunk from Ollama: {err}"),
+                )
+            })?;
+
+            for chunk in chunks {
+                if let Some(cancel) = &cancel_flag {
+                    if cancel.load(Ordering::Relaxed) {
+                        return Ok(StreamOutcome::Cancelled);
+                    }
+                }
+
                 if let Some(error) = &chunk.error {
-                    return Err(error.clone().into());
+                    return Err(OllamaError::new(
+                        OllamaErrorKind::StreamError,
+                        error.clone(),
+                    ));
                 }
 
                 let done = chunk.done;
                 on_chunk(chunk);
 
+                if let Some(cancel) = &cancel_flag {
+                    if cancel.load(Ordering::Relaxed) {
+                        return Ok(StreamOutcome::Cancelled);
+                    }
+                }
+
                 if done {
-                    return Ok(());
+                    return Ok(StreamOutcome::Completed);
+                }
+            }
+
+            if let Some(cancel) = &cancel_flag {
+                if cancel.load(Ordering::Relaxed) {
+                    return Ok(StreamOutcome::Cancelled);
                 }
             }
         }
 
-        if let Some(chunk) = decoder.finish()? {
+        if let Some(chunk) = decoder.finish().map_err(|err| {
+            OllamaError::new(
+                OllamaErrorKind::MalformedResponse,
+                format!("Malformed JSON in final chunk: {err}"),
+            )
+        })? {
+            if let Some(cancel) = &cancel_flag {
+                if cancel.load(Ordering::Relaxed) {
+                    return Ok(StreamOutcome::Cancelled);
+                }
+            }
+
             if let Some(error) = &chunk.error {
-                return Err(error.clone().into());
+                return Err(OllamaError::new(
+                    OllamaErrorKind::StreamError,
+                    error.clone(),
+                ));
             }
 
             let done = chunk.done;
             on_chunk(chunk);
 
+            if let Some(cancel) = &cancel_flag {
+                if cancel.load(Ordering::Relaxed) {
+                    return Ok(StreamOutcome::Cancelled);
+                }
+            }
+
             if done {
-                return Ok(());
+                return Ok(StreamOutcome::Completed);
             }
         }
 
-        Err("Ollama stream ended before a completion signal was received".into())
+        // If cancelled at end of stream:
+        if let Some(cancel) = &cancel_flag {
+            if cancel.load(Ordering::Relaxed) {
+                return Ok(StreamOutcome::Cancelled);
+            }
+        }
+
+        Err(OllamaError::new(
+            OllamaErrorKind::StreamError,
+            "Ollama stream ended before a completion signal was received",
+        ))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Read;
     use std::thread;
     use tiny_http::{Response, Server};
 
@@ -168,7 +578,6 @@ mod tests {
             .push(br#"lo","done":false}"#)
             .expect("partial JSON should be completed");
 
-        // No newline yet, so the JSON object is still buffered.
         assert!(second.is_empty());
 
         let third = decoder.push(b"\n").expect("completed JSON should parse");
@@ -241,7 +650,7 @@ mod tests {
         let handle = thread::spawn(move || {
             let mut request = server.recv().expect("server did not receive request");
             let mut body = String::new();
-            let mut reader = request.as_reader();
+            let reader = request.as_reader();
             reader
                 .read_to_string(&mut body)
                 .expect("failed to read request body");
@@ -249,7 +658,7 @@ mod tests {
             let response = Response::from_string(response_body)
                 .with_status_code(response_status)
                 .with_header(
-                    tiny_http::Header::from_bytes("Content-Type", "application/x-ndjson")
+                    tiny_http::Header::from_bytes("Content-Type", "application/json")
                         .expect("valid header"),
                 );
 
@@ -270,14 +679,10 @@ mod tests {
              {\"response\":\" world\",\"done\":true}\n",
         );
 
-        let client = OllamaClient {
-            base_url: address,
-            http: reqwest::Client::new(),
-        };
-
+        let client = OllamaClient::with_base_url(address);
         let mut received = Vec::new();
 
-        client
+        let outcome = client
             .generate_stream(
                 GenerateRequest {
                     model: "test-model".to_string(),
@@ -288,6 +693,8 @@ mod tests {
             )
             .await
             .expect("generation should succeed");
+
+        assert_eq!(outcome, StreamOutcome::Completed);
 
         let request_body = server_handle.join().expect("mock server thread failed");
         let json: serde_json::Value =
@@ -306,11 +713,7 @@ mod tests {
     #[tokio::test]
     async fn reports_http_errors() {
         let (address, server_handle) = mock_server(500, "mock server failure");
-
-        let client = OllamaClient {
-            base_url: address,
-            http: reqwest::Client::new(),
-        };
+        let client = OllamaClient::with_base_url(address);
 
         let result = client
             .generate_stream(
@@ -326,7 +729,131 @@ mod tests {
         let _ = server_handle.join().expect("mock server thread failed");
 
         let error = result.expect_err("HTTP 500 should return an error");
-        assert!(error.to_string().contains("500"));
+        assert_eq!(error.kind, OllamaErrorKind::HttpError);
+        assert_eq!(error.status_code, Some(500));
         assert!(error.to_string().contains("mock server failure"));
+    }
+
+    #[tokio::test]
+    async fn checks_health_successfully() {
+        let (address, _handle) = mock_server(200, "{\"version\":\"0.3.14\"}");
+        let client = OllamaClient::with_base_url(address);
+
+        let health = client.check_health().await;
+        assert!(health.is_healthy);
+        assert_eq!(health.version.as_deref(), Some("0.3.14"));
+        assert!(health.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn checks_health_failure_on_non_200() {
+        let (address, _handle) = mock_server(503, "Service Unavailable");
+        let client = OllamaClient::with_base_url(address);
+
+        let health = client.check_health().await;
+        assert!(!health.is_healthy);
+        assert!(health.error.is_some());
+    }
+
+    #[tokio::test]
+    async fn lists_models_and_parses_metadata() {
+        let json_body = r#"{
+            "models": [
+                {
+                    "name": "llama3.2:latest",
+                    "model": "llama3.2:latest",
+                    "size": 2019393189,
+                    "details": {
+                        "format": "gguf",
+                        "family": "llama",
+                        "parameter_size": "3.2B",
+                        "quantization_level": "Q4_K_M"
+                    }
+                }
+            ]
+        }"#;
+
+        let (address, _handle) = mock_server(200, json_body);
+        let client = OllamaClient::with_base_url(address);
+
+        let models = client.list_models().await.expect("should list models");
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].name, "llama3.2:latest");
+        assert_eq!(models[0].size, Some(2019393189));
+
+        let details = models[0].details.as_ref().unwrap();
+        assert_eq!(details.family.as_deref(), Some("llama"));
+        assert_eq!(details.parameter_size.as_deref(), Some("3.2B"));
+        assert_eq!(details.quantization_level.as_deref(), Some("Q4_K_M"));
+    }
+
+    #[tokio::test]
+    async fn handles_empty_or_malformed_model_responses() {
+        // Empty JSON object
+        let (address, _handle) = mock_server(200, "{}");
+        let client = OllamaClient::with_base_url(address);
+        let models = client.list_models().await.expect("empty models array");
+        assert!(models.is_empty());
+
+        // Malformed JSON
+        let (address2, _handle2) = mock_server(200, "not valid json {[[");
+        let client2 = OllamaClient::with_base_url(address2);
+        let err = client2
+            .list_models()
+            .await
+            .expect_err("should fail on malformed json");
+        assert_eq!(err.kind, OllamaErrorKind::MalformedResponse);
+    }
+
+    #[tokio::test]
+    async fn validates_requested_models() {
+        let json_body = r#"{
+            "models": [
+                { "name": "llama3.2:latest" },
+                { "name": "mistral:latest" }
+            ]
+        }"#;
+
+        let (address, _handle) = mock_server(200, json_body);
+        let client = OllamaClient::with_base_url(address);
+
+        assert!(client.validate_model("llama3.2").await.unwrap());
+        // Empty model name returns error
+        assert!(client.validate_model("   ").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn supports_cancellation_during_generation() {
+        let (address, _handle) = mock_server(
+            200,
+            "{\"response\":\"One\",\"done\":false}\n\
+             {\"response\":\"Two\",\"done\":false}\n\
+             {\"response\":\"Three\",\"done\":true}\n",
+        );
+
+        let client = OllamaClient::with_base_url(address);
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        let cancel_clone = Arc::clone(&cancel_flag);
+
+        let mut chunks_received = 0;
+        let outcome = client
+            .generate_stream_cancellable(
+                GenerateRequest {
+                    model: "test-model".to_string(),
+                    prompt: "hello".to_string(),
+                    think: None,
+                },
+                Some(cancel_flag),
+                |_| {
+                    chunks_received += 1;
+                    // Trigger cancellation after 1 chunk
+                    cancel_clone.store(true, Ordering::Relaxed);
+                },
+            )
+            .await
+            .expect("should return cancellation outcome");
+
+        assert_eq!(outcome, StreamOutcome::Cancelled);
+        assert!(chunks_received >= 1);
     }
 }
