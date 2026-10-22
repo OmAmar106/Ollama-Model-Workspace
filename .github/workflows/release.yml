@@ -5,6 +5,7 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -12,6 +13,10 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-22.04
+
+    defaults:
+      run:
+        working-directory: app
 
     steps:
       - name: Checkout repository
@@ -22,12 +27,7 @@ jobs:
         with:
           node-version: 22
           cache: npm
-
-      - name: Install frontend dependencies
-        run: npm ci
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+          cache-dependency-path: app/package-lock.json
 
       - name: Install Linux dependencies
         run: |
@@ -43,11 +43,18 @@ jobs:
             libayatana-appindicator3-dev \
             libwebkit2gtk-4.1-dev
 
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
       - name: Build and publish release
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
+          projectPath: app
           tagName: ${{ github.ref_name }}
           releaseName: Ollama Model Workspace ${{ github.ref_name }}
           releaseBody: |
