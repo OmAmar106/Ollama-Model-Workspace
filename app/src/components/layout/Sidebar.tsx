@@ -119,8 +119,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
               boxShadow: '0 2px 8px rgba(99, 102, 241, 0.4)',
             }}
           >
-            <Cpu size={16} color="#ffffff" />
-          </div>
+          <img
+            src="/icons.svg"
+            alt="App logo"
+            width={40}
+            height={40}
+            style={{ objectFit: 'contain' }}
+          />          </div>
           <div>
             <div style={{ fontWeight: 700, fontSize: '0.92rem', letterSpacing: '-0.01em' }}>
               Ollama Workspace

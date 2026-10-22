@@ -315,7 +315,8 @@ export const MessageItem: React.FC<MessageItemProps> = ({
               fontSize: '0.92rem',
               lineHeight: 1.6,
               color: 'var(--text-primary)',
-              whiteSpace: 'pre-wrap',
+              whiteSpace: 'pre-wrap',              
+              textAlign: 'right'
             }}
           >
             {effectiveContent}

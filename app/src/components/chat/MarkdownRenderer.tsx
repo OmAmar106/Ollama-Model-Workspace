@@ -9,7 +9,7 @@ interface MarkdownRendererProps {
 
 export const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({ content }) => {
   return (
-    <div className="markdown-body">
+    <div className="markdown-body" style={{ textAlign: 'left' }}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{

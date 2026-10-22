@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   cancelGeneration,
+  cancelSession,
   createBranchSession,
-  createSession,
   deleteSession,
   generateChat,
   getSessionMessages,
@@ -43,13 +43,20 @@ export function useChat(defaultModelName: string) {
   const [activeBranch, setActiveBranch] = useState<ActiveBranchState | null>(null);
 
   const activeGenIdRef = useRef<string | null>(null);
-  activeGenIdRef.current = activeGenerationId;
-
   const currentSessionIdRef = useRef<string | null>(null);
-  currentSessionIdRef.current = currentSessionId;
-
   const activeBranchRef = useRef<ActiveBranchState | null>(null);
-  activeBranchRef.current = activeBranch;
+
+  useEffect(() => {
+    activeGenIdRef.current = activeGenerationId;
+  }, [activeGenerationId]);
+
+  useEffect(() => {
+    currentSessionIdRef.current = currentSessionId;
+  }, [currentSessionId]);
+
+  useEffect(() => {
+    activeBranchRef.current = activeBranch;
+  }, [activeBranch]);
 
   // Load all sessions on mount
   const refreshSessions = useCallback(async () => {
@@ -263,7 +270,6 @@ export function useChat(defaultModelName: string) {
     } else if (currentSessionId) {
       // Fallback: cancel active generation for session
       try {
-        const { cancelSession } = await import('../api/tauri');
         await cancelSession(currentSessionId);
       } catch (err) {
         console.error('Cancel session error:', err);

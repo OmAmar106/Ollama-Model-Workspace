@@ -46,7 +46,7 @@ export const BranchSubChatPanel: React.FC<BranchSubChatPanelProps> = ({
 
   // Messages in this branch that were created AFTER the branch point
   const newBranchMessages = branchState.messages.filter(
-    (m, idx) => idx >= branchState.messages.findIndex((x) => x.id === branchState.branchedFromMessageId) + 1
+    (_, idx) => idx >= branchState.messages.findIndex((x) => x.id === branchState.branchedFromMessageId) + 1
   );
 
   return (

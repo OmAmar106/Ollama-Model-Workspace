@@ -102,6 +102,8 @@ export const Composer: React.FC<ComposerProps> = ({
             resize: 'none',
             maxHeight: '220px',
             fontFamily: 'inherit',
+            outline: 'none',
+            boxShadow: 'none',
           }}
         />
 
