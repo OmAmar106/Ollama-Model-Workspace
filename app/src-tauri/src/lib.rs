@@ -9,7 +9,7 @@ use rusqlite::Connection;
 use std::{sync::Mutex, time::Duration};
 use tauri::Manager;
 
-pub const SESSION_RETENTION_DAYS: i64 = 30;
+pub const SESSION_RETENTION_DAYS: i64 = 14;
 const SESSION_CLEANUP_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
 pub struct AppDatabase(pub Mutex<Connection>);

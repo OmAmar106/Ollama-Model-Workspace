@@ -111,28 +111,30 @@ export const MessageList: React.FC<MessageListProps> = ({
       }}
     >
       <div style={{ maxWidth: '820px', width: '100%', margin: '0 auto', paddingBottom: '2rem' }}>
-        {messages.map((message) => {
-          const isAnchoredBranch = activeBranch?.branchedFromMessageId === message.id;
+        {messages
+          .filter((message) => !(isStreaming && message.status === 'generating'))
+          .map((message) => {
+            const isAnchoredBranch = activeBranch?.branchedFromMessageId === message.id;
 
-          return (
-            <React.Fragment key={message.id}>
-              <MessageItem
-                message={message}
-                onBranchFromHere={onBranchFromHere}
-                onRetry={onRetry}
-              />
-
-              {/* Anchored Sub-Chat Branch Panel above/below selected message point */}
-              {isAnchoredBranch && activeBranch && (
-                <BranchSubChatPanel
-                  branchState={activeBranch}
-                  onSendMessage={onSendBranchMessage}
-                  onClose={onCloseBranch}
+            return (
+              <React.Fragment key={message.id}>
+                <MessageItem
+                  message={message}
+                  onBranchFromHere={onBranchFromHere}
+                  onRetry={onRetry}
                 />
-              )}
-            </React.Fragment>
-          );
-        })}
+
+                {/* Anchored Sub-Chat Branch Panel above/below selected message point */}
+                {isAnchoredBranch && activeBranch && (
+                  <BranchSubChatPanel
+                    branchState={activeBranch}
+                    onSendMessage={onSendBranchMessage}
+                    onClose={onCloseBranch}
+                  />
+                )}
+              </React.Fragment>
+            );
+          })}
 
         {/* In-Flight Streaming Message */}
         {isStreaming && (

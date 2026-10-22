@@ -7,7 +7,6 @@ import {
   Trash2,
   Pencil,
   MoreVertical,
-  Cpu,
 } from 'lucide-react';
 import type { Session } from '../../api/types';
 

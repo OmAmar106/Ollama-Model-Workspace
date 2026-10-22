@@ -3,6 +3,7 @@ import {
   cancelGeneration,
   cancelSession,
   createBranchSession,
+  createSession,
   deleteSession,
   generateChat,
   getSessionMessages,
@@ -26,29 +27,51 @@ export interface ActiveBranchState {
   streamThinking: string;
 }
 
+interface SessionStreamState {
+  isGenerating: boolean;
+  generationId: string | null;
+  content: string;
+  thinking: string;
+}
+
+function appendStreamChunk(
+  state: SessionStreamState,
+  content: string,
+  thinking: string
+): SessionStreamState {
+  return {
+    ...state,
+    content: state.content + content,
+    thinking: state.thinking + thinking,
+  };
+}
+
 export function useChat(defaultModelName: string) {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [isLoadingMessages, setIsLoadingMessages] = useState<boolean>(false);
 
-  // Generation state for current session
-  const [isGenerating, setIsGenerating] = useState<boolean>(false);
-  const [activeGenerationId, setActiveGenerationId] = useState<string | null>(null);
-  const [streamContent, setStreamContent] = useState<string>('');
-  const [streamThinking, setStreamThinking] = useState<string>('');
+  // Generation state is tracked per session so background chats can finish
+  // without leaking streaming output into the currently viewed chat.
+  const [sessionStreams, setSessionStreams] = useState<
+    Record<string, SessionStreamState>
+  >({});
   const [isThinkEnabled, setIsThinkEnabled] = useState<boolean>(false);
+
+  const currentStream = currentSessionId
+    ? sessionStreams[currentSessionId]
+    : undefined;
+  const isGenerating = currentStream?.isGenerating ?? false;
+  const activeGenerationId = currentStream?.generationId ?? null;
+  const streamContent = currentStream?.content ?? '';
+  const streamThinking = currentStream?.thinking ?? '';
 
   // Active branch sub-chat state (anchored above branched message)
   const [activeBranch, setActiveBranch] = useState<ActiveBranchState | null>(null);
 
-  const activeGenIdRef = useRef<string | null>(null);
   const currentSessionIdRef = useRef<string | null>(null);
   const activeBranchRef = useRef<ActiveBranchState | null>(null);
-
-  useEffect(() => {
-    activeGenIdRef.current = activeGenerationId;
-  }, [activeGenerationId]);
 
   useEffect(() => {
     currentSessionIdRef.current = currentSessionId;
@@ -109,33 +132,11 @@ export function useChat(defaultModelName: string) {
 
     const setupListener = async () => {
       const dispose = await onChatStream((event: ChatStreamEvent) => {
-        // 1. Check if event belongs to current main session
-        if (event.session_id === currentSessionIdRef.current) {
-          if (!event.done) {
-            if (event.content) {
-              setStreamContent((prev) => prev + event.content);
-            }
-            if (event.thinking) {
-              setStreamThinking((prev) => prev + event.thinking);
-            }
-          } else {
-            // Terminal event for main session: reload messages from DB
-            setIsGenerating(false);
-            setActiveGenerationId(null);
-            setStreamContent('');
-            setStreamThinking('');
-            if (currentSessionIdRef.current) {
-              loadMessages(currentSessionIdRef.current);
-              refreshSessions();
-            }
-          }
-        }
+        const isBranchEvent =
+          activeBranchRef.current?.branchSession.id === event.session_id;
 
-        // 2. Check if event belongs to active branch session
-        if (
-          activeBranchRef.current &&
-          event.session_id === activeBranchRef.current.branchSession.id
-        ) {
+        // Branch sessions keep their own streaming state.
+        if (isBranchEvent) {
           if (!event.done) {
             setActiveBranch((prev) => {
               if (!prev) return null;
@@ -146,8 +147,7 @@ export function useChat(defaultModelName: string) {
               };
             });
           } else {
-            // Terminal event for branch
-            const branchId = activeBranchRef.current.branchSession.id;
+            const branchId = event.session_id;
             getSessionMessages(branchId).then((branchMsgs) => {
               setActiveBranch((prev) => {
                 if (!prev) return null;
@@ -161,6 +161,36 @@ export function useChat(defaultModelName: string) {
               });
               refreshSessions();
             });
+          }
+          return;
+        }
+
+        if (!event.done) {
+          // Update the owning session even if it is not currently visible, so
+          // switching back shows the accumulated output.
+          setSessionStreams((prev) => {
+            const existing = prev[event.session_id];
+            if (!existing) return prev;
+            return {
+              ...prev,
+              [event.session_id]: appendStreamChunk(
+                existing,
+                event.content || '',
+                event.thinking || ''
+              ),
+            };
+          });
+        } else {
+          // Terminal event always clears only its own session's stream.
+          setSessionStreams((prev) => {
+            if (!prev[event.session_id]) return prev;
+            const next = { ...prev };
+            delete next[event.session_id];
+            return next;
+          });
+          refreshSessions();
+          if (event.session_id === currentSessionIdRef.current) {
+            loadMessages(event.session_id);
           }
         }
       });
@@ -197,10 +227,6 @@ export function useChat(defaultModelName: string) {
   const startNewChat = useCallback(() => {
     setCurrentSessionId(null);
     setMessages([]);
-    setStreamContent('');
-    setStreamThinking('');
-    setIsGenerating(false);
-    setActiveGenerationId(null);
     setActiveBranch(null);
   }, []);
 
@@ -212,50 +238,74 @@ export function useChat(defaultModelName: string) {
       const model = modelNameOverride || currentSession?.model_name || defaultModelName;
       let targetSessionId = currentSessionId;
 
-      // Optimistic user message representation
-      const tempUserMsg: Message = {
-        id: `temp-user-${Date.now()}`,
-        session_id: targetSessionId || '',
-        role: 'user',
-        content: prompt.trim(),
-        thinking_content: null,
-        status: 'completed',
-        created_at: new Date().toISOString(),
-        completed_at: null,
-      };
-
-      setMessages((prev) => [...prev, tempUserMsg]);
-      setIsGenerating(true);
-      setStreamContent('');
-      setStreamThinking('');
-
       try {
-        const chatStart = await generateChat(
-          model,
-          prompt.trim(),
-          targetSessionId,
-          isThinkEnabled
-        );
-
-        setActiveGenerationId(chatStart.generation.id);
-
-        // If this was a new session, select it and refresh sessions
         if (!targetSessionId) {
-          targetSessionId = chatStart.session.id;
-          setCurrentSessionId(chatStart.session.id);
+          const newSession = await createSession(model, isThinkEnabled, null, null);
+          targetSessionId = newSession.id;
+          currentSessionIdRef.current = newSession.id;
+          setCurrentSessionId(newSession.id);
+          setMessages([]);
           await refreshSessions();
         }
 
-        // Reconcile messages with backend
-        await loadMessages(targetSessionId);
+        const sessionId = targetSessionId;
+
+        // Optimistic user message representation
+        const tempUserMsg: Message = {
+          id: `temp-user-${Date.now()}`,
+          session_id: sessionId,
+          role: 'user',
+          content: prompt.trim(),
+          thinking_content: null,
+          status: 'completed',
+          created_at: new Date().toISOString(),
+          completed_at: null,
+        };
+
+        setMessages((prev) => [...prev, tempUserMsg]);
+        setSessionStreams((prev) => ({
+          ...prev,
+          [sessionId]: {
+            isGenerating: true,
+            generationId: null,
+            content: '',
+            thinking: '',
+          },
+        }));
+
+        await generateChat(
+          model,
+          prompt.trim(),
+          sessionId,
+          isThinkEnabled
+        );
+
+        // The terminal event normally clears this first; make sure nothing is
+        // left behind if event delivery is delayed.
+        setSessionStreams((prev) => {
+          if (!prev[sessionId]) return prev;
+          const next = { ...prev };
+          delete next[sessionId];
+          return next;
+        });
+
+        // Only reconcile if the user is still viewing this session.
+        if (sessionId === currentSessionIdRef.current) {
+          await loadMessages(sessionId);
+        }
       } catch (err: unknown) {
         console.error('Generation error or cancellation:', err);
-        setIsGenerating(false);
-        setActiveGenerationId(null);
-        setStreamContent('');
-        setStreamThinking('');
-        if (targetSessionId) {
-          await loadMessages(targetSessionId);
+        const sessionId = targetSessionId;
+        if (sessionId) {
+          setSessionStreams((prev) => {
+            if (!prev[sessionId]) return prev;
+            const next = { ...prev };
+            delete next[sessionId];
+            return next;
+          });
+          if (sessionId === currentSessionIdRef.current) {
+            await loadMessages(sessionId);
+          }
         }
       }
     },
