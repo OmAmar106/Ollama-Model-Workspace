@@ -1,0 +1,61 @@
+
+name: Release Ubuntu App
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            librsvg2-dev \
+            libayatana-appindicator3-dev \
+            libwebkit2gtk-4.1-dev
+
+      - name: Build and publish release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: Ollama Model Workspace ${{ github.ref_name }}
+          releaseBody: |
+            Download the Debian package from the Assets section below.
+
+            Install on Ubuntu using:
+
+            sudo apt install ./YOUR_DOWNLOADED_PACKAGE.deb
+          releaseDraft: false
+          prerelease: false
+          args: --bundles deb
