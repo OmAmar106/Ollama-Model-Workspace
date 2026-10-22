@@ -1,4 +1,4 @@
-use chrono::Utc;
+use chrono::{Duration, Utc};
 use rusqlite::{Connection, OptionalExtension, Result, params};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -155,6 +155,25 @@ pub fn delete_session(connection: &Connection, session_id: &str) -> Result<bool>
     Ok(deleted == 1)
 }
 
+/// Delete sessions whose `updated_at` is older than `days`, returning the
+/// deleted session IDs. Messages and generations are removed by the
+/// `ON DELETE CASCADE` foreign keys.
+pub fn delete_sessions_older_than(connection: &Connection, days: i64) -> Result<Vec<String>> {
+    let cutoff = (Utc::now() - Duration::days(days)).to_rfc3339();
+
+    let ids = {
+        let mut statement = connection.prepare("SELECT id FROM sessions WHERE updated_at < ?1")?;
+        let rows = statement.query_map([&cutoff], |row| row.get::<_, String>(0))?;
+        rows.collect::<Result<Vec<_>>>()?
+    };
+
+    if !ids.is_empty() {
+        connection.execute("DELETE FROM sessions WHERE updated_at < ?1", [&cutoff])?;
+    }
+
+    Ok(ids)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -258,5 +277,46 @@ mod tests {
         let after_delete = list_sessions(&connection).unwrap();
         assert_eq!(after_delete.len(), 1);
         assert_eq!(after_delete[0].id, s1.id);
+    }
+
+    #[test]
+    fn deletes_sessions_older_than_retention_window_with_cascade() {
+        let (_directory, connection) = setup_database();
+
+        let old = create_session(&connection, "old-model", None).unwrap();
+        let recent = create_session(&connection, "recent-model", None).unwrap();
+
+        crate::db::messages::create_message(
+            &connection,
+            &old.id,
+            "user",
+            "Old message",
+            None,
+            "completed",
+        )
+        .unwrap();
+
+        let old_timestamp = (Utc::now() - Duration::days(31)).to_rfc3339();
+        connection
+            .execute(
+                "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
+                params![old_timestamp, old.id],
+            )
+            .unwrap();
+
+        let deleted = delete_sessions_older_than(&connection, 30).unwrap();
+        assert_eq!(deleted, vec![old.id.clone()]);
+
+        assert!(get_session(&connection, &old.id).unwrap().is_none());
+        assert!(get_session(&connection, &recent.id).unwrap().is_some());
+
+        let remaining_messages: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE session_id = ?1",
+                [&old.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining_messages, 0);
     }
 }

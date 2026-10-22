@@ -392,6 +392,10 @@ pub async fn generate_chat(
 
         let cancel_flag = gen_manager.0.register(&session.id, &generation.id);
 
+        // Mark the session as active so retention cleanup does not remove it
+        // while a generation is in flight.
+        sessions::update_session_timestamp(&connection, &session.id).ok();
+
         let history = messages::get_session_messages(&connection, &session.id)
             .map_err(|error| format!("Failed to load history: {error}"))?;
 
