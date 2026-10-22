@@ -165,3 +165,8 @@ Sessions that have been inactive for **14 days** are pruned automatically at sta
 - [Ollama](https://ollama.com) for making local LLMs accessible.
 - [Tauri](https://tauri.app) for the lightweight desktop runtime.
 - The open-source projects that power this app's frontend and backend.
+
+## To-Do
+
+- Allow Image attachment
+- Format KaTeX Outputs to show correct mathematical symbols
