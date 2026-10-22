@@ -295,13 +295,12 @@ export const MessageItem: React.FC<MessageItemProps> = ({
                   color: 'var(--reasoning-text)',
                   fontSize: '0.82rem',
                   lineHeight: 1.55,
-                  fontStyle: 'italic',
-                  whiteSpace: 'pre-wrap',
+                  textAlign: 'left',
                   maxHeight: '280px',
                   overflowY: 'auto',
                 }}
               >
-                {effectiveThinking}
+                <MarkdownRenderer content={effectiveThinking} />
                 {isStreaming && !effectiveContent && <span className="streaming-cursor" />}
               </div>
             )}

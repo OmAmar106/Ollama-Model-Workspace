@@ -223,11 +223,11 @@ export const BranchSubChatPanel: React.FC<BranchSubChatPanelProps> = ({
                   style={{
                     fontSize: '0.78rem',
                     color: 'var(--reasoning-text)',
-                    fontStyle: 'italic',
+                    textAlign: 'left',
                     marginBottom: '0.4rem',
                   }}
                 >
-                  {branchState.streamThinking}
+                  <MarkdownRenderer content={branchState.streamThinking} />
                 </div>
               )}
               <MarkdownRenderer content={branchState.streamContent} />

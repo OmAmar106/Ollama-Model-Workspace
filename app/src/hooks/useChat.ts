@@ -105,9 +105,10 @@ export function useChat(defaultModelName: string) {
   // Register chat streaming event listener
   useEffect(() => {
     let unlisten: (() => void) | undefined;
+    let cancelled = false;
 
     const setupListener = async () => {
-      unlisten = await onChatStream((event: ChatStreamEvent) => {
+      const dispose = await onChatStream((event: ChatStreamEvent) => {
         // 1. Check if event belongs to current main session
         if (event.session_id === currentSessionIdRef.current) {
           if (!event.done) {
@@ -163,12 +164,22 @@ export function useChat(defaultModelName: string) {
           }
         }
       });
+
+      if (cancelled) {
+        dispose();
+      } else {
+        unlisten = dispose;
+      }
     };
 
     setupListener();
 
     return () => {
-      if (unlisten) unlisten();
+      cancelled = true;
+      if (unlisten) {
+        unlisten();
+        unlisten = undefined;
+      }
     };
   }, [loadMessages, refreshSessions]);
 
