@@ -55,6 +55,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           projectPath: app
+          tauriScript: npx tauri
           tagName: ${{ github.ref_name }}
           releaseName: Ollama Model Workspace ${{ github.ref_name }}
           releaseBody: |
