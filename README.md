@@ -12,7 +12,8 @@ Everything is persisted locally in SQLite — no accounts, no telemetry, no clou
 
 ## Screenshots
 
-
+<img width="1854" height="1046" alt="image" src="https://github.com/user-attachments/assets/746729bb-b423-4baf-a57e-e6daf2061266" />
+<img width="1854" height="1046" alt="image" src="https://github.com/user-attachments/assets/ef845fc8-a746-438b-aeb5-08f5fb8ea635" />
 
 ## Features
 
